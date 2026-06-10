@@ -990,8 +990,31 @@ int main(int argc, char** argv)
                     *(node->get_clock()), 2000,
                     "[抬臂] 高度=%.2f 夹爪=0.15", object_z);
 
-                // 对准后夹爪已包裹物体，无需前送，直接夹紧
+                // 抬臂完成 → 前送靠近物体
                 if (IsTimedStepDone(5.0))
+                {
+                    step_timer_running_ = false;
+                    current_state = STEP_FORWARD;
+                    StartTimedStep();
+                }
+                break;
+            }
+
+            // --------------------------------------------------
+            case STEP_FORWARD:
+            {
+                if (!step_timer_running_) StartTimedStep();
+
+                geometry_msgs::msg::Twist vel_msg;
+                vel_msg.linear.x = 0.1;
+                vel_pub->publish(vel_msg);
+
+                RCLCPP_INFO_THROTTLE(node->get_logger(),
+                    *(node->get_clock()), 1000,
+                    "[前送] 速度=0.1 m/s");
+
+                // 缩短至 4s (~0.4m), 避免推走物体
+                if (IsTimedStepDone(4.0))
                 {
                     step_timer_running_ = false;
                     current_state = STEP_GRAB;
@@ -999,10 +1022,6 @@ int main(int argc, char** argv)
                 }
                 break;
             }
-
-            // --------------------------------------------------
-            // STEP_FORWARD 已移除：对准完成后夹爪已包裹物体，无需前送
-            // --------------------------------------------------
 
             // --------------------------------------------------
             case STEP_GRAB:
