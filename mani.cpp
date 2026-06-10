@@ -1116,24 +1116,20 @@ int main(int argc, char** argv)
 
                 StopChassis();
 
-                // 缩小碰撞体以便通过窄通道:
-                //   lift=0.25  (降低高度)
-                //   arm=0.0    (水平收回)
-                //   gripper=0.07 (保持夹紧持物)
+                // 降低 lift 至运输高度, 缩小碰撞体以便通过窄通道
+                // gripper 保持 0.07 (持物), 不碰 arm 避免松脱
                 sensor_msgs::msg::JointState mani_msg;
-                mani_msg.name.resize(3);
+                mani_msg.name.resize(2);
                 mani_msg.name[0] = "lift";
-                mani_msg.name[1] = "arm";
-                mani_msg.name[2] = "gripper";
-                mani_msg.position.resize(3);
+                mani_msg.name[1] = "gripper";
+                mani_msg.position.resize(2);
                 mani_msg.position[0] = 0.25;
-                mani_msg.position[1] = 0.0;
-                mani_msg.position[2] = 0.07;
+                mani_msg.position[1] = 0.07;
                 mani_pub->publish(mani_msg);
 
                 RCLCPP_INFO_THROTTLE(node->get_logger(),
                     *(node->get_clock()), 2000,
-                    "[降臂收臂] lift=0.25 arm=0.0 gripper=0.07");
+                    "[降臂] lift=0.25 进入运输姿态");
 
                 if (IsTimedStepDone(4.0))
                 {
