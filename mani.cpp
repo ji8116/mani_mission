@@ -52,6 +52,7 @@ enum StepState
     STEP_GRAB,             // 闭合夹爪
     STEP_OBJ_UP,           // 提起物体
     STEP_BACKWARD,         // 底盘后退
+    STEP_LOWER_ARM,        // 降臂至运输高度（缩小碰撞体过窄通道）
     STEP_GOTO_GUEST,       // 导航到客人
     STEP_STAY_GUEST,       // 客人停留 + 人脸确认
     STEP_DONE,             // 任务完成
@@ -139,7 +140,7 @@ const float EMA_ALPHA = 0.25;          // EMA 平滑系数 (越小越平滑)
 const float JUMP_THRESHOLD = 0.25;     // 相邻帧跳变阈值 (m)
 const int CONVERGE_REQUIRED = 20;      // 连续收敛所需帧数
 
-float align_x = 1.0;
+float align_x = 0.8;
 float align_y = 0.0;
 
 int grab_retry_count = 0;
@@ -1006,7 +1007,7 @@ int main(int argc, char** argv)
                 if (!step_timer_running_) StartTimedStep();
 
                 geometry_msgs::msg::Twist vel_msg;
-                vel_msg.linear.x = 0.1;
+                vel_msg.linear.x = 0.03;
                 vel_pub->publish(vel_msg);
 
                 RCLCPP_INFO_THROTTLE(node->get_logger(),
@@ -1100,10 +1101,42 @@ int main(int argc, char** argv)
                     StopChassis();
 
                     RCLCPP_INFO(node->get_logger(),
-                        "=== 抓取流程完成, 前往客人 ===");
+                        "=== 抓取流程完成, 降臂后前往客人 ===");
+
+                    current_state = STEP_LOWER_ARM;
+                    StartTimedStep();
+                }
+                break;
+            }
+
+            // --------------------------------------------------
+            case STEP_LOWER_ARM:
+            {
+                if (!step_timer_running_) StartTimedStep();
+
+                StopChassis();
+
+                // 降低 lift 至运输高度, 缩小碰撞体以便通过窄通道
+                // gripper 保持 0.07 (持物), lift 降至 0.25
+                sensor_msgs::msg::JointState mani_msg;
+                mani_msg.name.resize(2);
+                mani_msg.name[0] = "lift";
+                mani_msg.name[1] = "gripper";
+                mani_msg.position.resize(2);
+                mani_msg.position[0] = 0.25;        // 运输高度
+                mani_msg.position[1] = 0.07;        // 保持夹紧
+                mani_pub->publish(mani_msg);
+
+                RCLCPP_INFO_THROTTLE(node->get_logger(),
+                    *(node->get_clock()), 2000,
+                    "[降臂] lift=0.25 进入运输姿态");
+
+                if (IsTimedStepDone(4.0))
+                {
+                    step_timer_running_ = false;
 
                     success_count++;
-                    current_index = 1;   // 指向 "guest"
+                    current_index = 1;
                     current_state = STEP_GOTO_GUEST;
                     SendWaypoint(waypoints[1]);   // "guest"
                 }
