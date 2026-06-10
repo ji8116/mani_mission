@@ -238,9 +238,23 @@ void ObjectCallback(const wpr_simulation2::msg::Object::SharedPtr msg)
         // 持续更新目标坐标
         if (msg->x.size() > 0)
         {
-            object_x = msg->x[0];
-            object_y = msg->y[0];
-            object_z = msg->z[0];
+            float ox = msg->x[0];
+            float oy = msg->y[0];
+            float oz = msg->z[0];
+
+            // 有效性检查：全零或异常值视为无效数据
+            if (fabs(ox) < 0.001 && fabs(oy) < 0.001 && fabs(oz) < 0.001)
+            {
+                return;
+            }
+            if (fabs(ox) > 50.0 || fabs(oy) > 50.0)
+            {
+                return;
+            }
+
+            object_x = ox;
+            object_y = oy;
+            object_z = oz;
             object_received_ = true;
         }
     }
@@ -830,6 +844,15 @@ int main(int argc, char** argv)
                     break;
                 }
 
+                // 等待有效 objects_3d 数据
+                if (!object_received_)
+                {
+                    RCLCPP_INFO_THROTTLE(node->get_logger(),
+                        *(node->get_clock()), 2000,
+                        "[对准] 等待 objects_3d 有效数据...");
+                    break;
+                }
+
                 float diff_x = object_x - align_x;
                 float diff_y = object_y - align_y;
 
@@ -837,10 +860,12 @@ int main(int argc, char** argv)
 
                 if (fabs(diff_x) > 0.02 || fabs(diff_y) > 0.01)
                 {
-                    vel_msg.linear.x = diff_x * 0.8;
-                    vel_msg.linear.y = diff_y * 0.8;
+                    // 速度限幅, 防止 objects 数据异常导致暴冲
+                    vel_msg.linear.x = std::clamp(diff_x * 0.8, -0.25, 0.25);
+                    vel_msg.linear.y = std::clamp(diff_y * 0.8, -0.20, 0.20);
 
-                    RCLCPP_INFO(node->get_logger(),
+                    RCLCPP_INFO_THROTTLE(node->get_logger(),
+                        *(node->get_clock()), 1000,
                         "[对准] obj=(%.2f,%.2f,%.2f) 误差=(%.2f,%.2f) 速度=(%.2f,%.2f)",
                         object_x, object_y, object_z,
                         diff_x, diff_y,
