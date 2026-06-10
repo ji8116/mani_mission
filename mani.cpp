@@ -977,7 +977,6 @@ int main(int argc, char** argv)
             {
                 if (!step_timer_running_) StartTimedStep();
 
-                // 发送一次指令
                 sensor_msgs::msg::JointState mani_msg;
                 mani_msg.name.resize(2);
                 mani_msg.name[0] = "lift";
@@ -987,32 +986,12 @@ int main(int argc, char** argv)
                 mani_msg.position[1] = 0.15;         // 张开夹爪
                 mani_pub->publish(mani_msg);
 
-                RCLCPP_INFO(node->get_logger(),
+                RCLCPP_INFO_THROTTLE(node->get_logger(),
+                    *(node->get_clock()), 2000,
                     "[抬臂] 高度=%.2f 夹爪=0.15", object_z);
 
-                if (IsTimedStepDone(8.0))
-                {
-                    step_timer_running_ = false;
-                    current_state = STEP_FORWARD;
-                    StartTimedStep();
-                }
-                break;
-            }
-
-            // --------------------------------------------------
-            case STEP_FORWARD:
-            {
-                if (!step_timer_running_) StartTimedStep();
-
-                geometry_msgs::msg::Twist vel_msg;
-                vel_msg.linear.x = 0.1;
-                vel_pub->publish(vel_msg);
-
-                RCLCPP_INFO_THROTTLE(node->get_logger(),
-                    *(node->get_clock()), 1000,
-                    "[前送] 速度=0.1 m/s");
-
-                if (IsTimedStepDone(8.0))
+                // 对准后夹爪已包裹物体，无需前送，直接夹紧
+                if (IsTimedStepDone(5.0))
                 {
                     step_timer_running_ = false;
                     current_state = STEP_GRAB;
@@ -1020,6 +999,10 @@ int main(int argc, char** argv)
                 }
                 break;
             }
+
+            // --------------------------------------------------
+            // STEP_FORWARD 已移除：对准完成后夹爪已包裹物体，无需前送
+            // --------------------------------------------------
 
             // --------------------------------------------------
             case STEP_GRAB:
@@ -1037,7 +1020,8 @@ int main(int argc, char** argv)
                 mani_msg.position[1] = 0.07;         // 闭合夹爪
                 mani_pub->publish(mani_msg);
 
-                RCLCPP_INFO(node->get_logger(),
+                RCLCPP_INFO_THROTTLE(node->get_logger(),
+                    *(node->get_clock()), 2000,
                     "[夹紧] 夹爪闭合到 0.07");
 
                 if (IsTimedStepDone(5.0))
