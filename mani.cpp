@@ -128,11 +128,25 @@ float object_y = 0.0;
 float object_z = 0.0;
 bool object_received_ = false;
 
+// EMA 滤波 + 跳变检测（解决 objects_3d 数据不稳定问题）
+float object_x_filt_ = 0.0;
+float object_y_filt_ = 0.0;
+float prev_raw_x_ = -99.0;       // 上一帧原始 x，用于跳变检测
+bool filter_inited_ = false;
+int align_converge_count_ = 0;   // 连续收敛帧计数
+
+const float EMA_ALPHA = 0.25;          // EMA 平滑系数 (越小越平滑)
+const float JUMP_THRESHOLD = 0.25;     // 相邻帧跳变阈值 (m)
+const int CONVERGE_REQUIRED = 20;      // 连续收敛所需帧数
+
 float align_x = 1.0;
 float align_y = 0.0;
 
 int grab_retry_count = 0;
 int max_grab_retry = 2;
+
+// 对准阶段计时器
+rclcpp::Time align_start_time(0, 0, RCL_ROS_TIME);
 
 // 抓取步骤计时
 rclcpp::Time step_start_time(0, 0, RCL_ROS_TIME);
@@ -143,7 +157,7 @@ bool step_timer_running_ = false;
 // ============================================================
 
 double min_front_dist_ = 10.0;
-const double safety_threshold_ = 0.55;
+const double safety_threshold_ = 0.25;
 
 // ============================================================
 // 实验统计
@@ -235,7 +249,7 @@ void ObjectCallback(const wpr_simulation2::msg::Object::SharedPtr msg)
 {
     if (current_state == STEP_ALIGN_OBJ)
     {
-        // 持续更新目标坐标
+        // 持续更新目标坐标（带 EMA 滤波 + 跳变检测）
         if (msg->x.size() > 0)
         {
             float ox = msg->x[0];
@@ -252,8 +266,29 @@ void ObjectCallback(const wpr_simulation2::msg::Object::SharedPtr msg)
                 return;
             }
 
-            object_x = ox;
-            object_y = oy;
+            // 跳变检测：相邻帧原始 x 差值过大则重置滤波器
+            if (filter_inited_ && fabs(ox - prev_raw_x_) > JUMP_THRESHOLD)
+            {
+                filter_inited_ = false;
+                align_converge_count_ = 0;
+            }
+            prev_raw_x_ = ox;
+
+            // EMA 指数滑动平均滤波
+            if (!filter_inited_)
+            {
+                object_x_filt_ = ox;
+                object_y_filt_ = oy;
+                filter_inited_ = true;
+            }
+            else
+            {
+                object_x_filt_ = EMA_ALPHA * ox + (1.0f - EMA_ALPHA) * object_x_filt_;
+                object_y_filt_ = EMA_ALPHA * oy + (1.0f - EMA_ALPHA) * object_y_filt_;
+            }
+
+            object_x = object_x_filt_;
+            object_y = object_y_filt_;
             object_z = oz;
             object_received_ = true;
         }
@@ -433,6 +468,11 @@ void RetryGrab()
         object_x = 0;
         object_y = 0;
         object_z = 0;
+        object_x_filt_ = 0;
+        object_y_filt_ = 0;
+        filter_inited_ = false;
+        align_converge_count_ = 0;
+        align_start_time = rclcpp::Time(0, 0, RCL_ROS_TIME);   // 重置计时器
 
         std_msgs::msg::String cmd;
         cmd.data = "start objects";
@@ -546,7 +586,7 @@ void DoRGBCheck()
         behavior_pub->publish(cmd);
 
         // 等待 objects 数据到达
-        rclcpp::sleep_for(2s);
+        rclcpp::sleep_for(8s);
 
         current_state = STEP_ALIGN_OBJ;
     }
@@ -853,39 +893,79 @@ int main(int argc, char** argv)
                     break;
                 }
 
+                // 首次进入对准阶段时初始化计时器和滤波器
+                if (align_start_time.seconds() == 0.0)
+                {
+                    align_start_time = node->now();
+                    filter_inited_ = false;
+                    align_converge_count_ = 0;
+                }
+
+                // 对准超时保护 (30s)
+                double align_elapsed = (node->now() - align_start_time).seconds();
+                if (align_elapsed > 30.0)
+                {
+                    StopChassis();
+                    RCLCPP_WARN(node->get_logger(),
+                        "[对准] 超时 (%.0fs), 以当前位姿进入抓取", align_elapsed);
+                    std_msgs::msg::String cmd;
+                    cmd.data = "stop objects";
+                    behavior_pub->publish(cmd);
+                    current_state = STEP_HAND_UP;
+                    StartTimedStep();
+                    break;
+                }
+
                 float diff_x = object_x - align_x;
                 float diff_y = object_y - align_y;
 
                 geometry_msgs::msg::Twist vel_msg;
 
-                if (fabs(diff_x) > 0.02 || fabs(diff_y) > 0.01)
+                // 收敛检测：用较大容差 + 连续计数防抖
+                if (fabs(diff_x) > 0.08 || fabs(diff_y) > 0.05)
                 {
+                    align_converge_count_ = 0;   // 脱离容差范围，重置计数
+
                     // 速度限幅, 防止 objects 数据异常导致暴冲
                     vel_msg.linear.x = std::clamp(diff_x * 0.8, -0.25, 0.25);
                     vel_msg.linear.y = std::clamp(diff_y * 0.8, -0.20, 0.20);
 
                     RCLCPP_INFO_THROTTLE(node->get_logger(),
                         *(node->get_clock()), 1000,
-                        "[对准] obj=(%.2f,%.2f,%.2f) 误差=(%.2f,%.2f) 速度=(%.2f,%.2f)",
+                        "[对准] obj=(%.2f,%.2f,%.2f) 误差=(%.2f,%.2f) 速度=(%.2f,%.2f) 收敛=%d/%d",
                         object_x, object_y, object_z,
                         diff_x, diff_y,
-                        vel_msg.linear.x, vel_msg.linear.y);
+                        vel_msg.linear.x, vel_msg.linear.y,
+                        align_converge_count_, CONVERGE_REQUIRED);
                 }
                 else
                 {
-                    // 对准完成
+                    // 在容差范围内，累计连续帧数
+                    align_converge_count_++;
                     StopChassis();
 
-                    std_msgs::msg::String cmd;
-                    cmd.data = "stop objects";
-                    behavior_pub->publish(cmd);
+                    RCLCPP_INFO_THROTTLE(node->get_logger(),
+                        *(node->get_clock()), 500,
+                        "[对准] 容差内 obj=(%.2f,%.2f) 误差=(%.2f,%.2f) 收敛=%d/%d",
+                        object_x, object_y,
+                        diff_x, diff_y,
+                        align_converge_count_, CONVERGE_REQUIRED);
 
-                    RCLCPP_INFO(node->get_logger(),
-                        "=== 对准完成! 目标坐标 (%.2f,%.2f,%.2f) ===",
-                        object_x, object_y, object_z);
+                    if (align_converge_count_ >= CONVERGE_REQUIRED)
+                    {
+                        // 对准完成
+                        
+                        std_msgs::msg::String cmd;
+                        cmd.data = "stop objects";
+                        behavior_pub->publish(cmd);
 
-                    current_state = STEP_HAND_UP;
-                    StartTimedStep();
+                        RCLCPP_INFO(node->get_logger(),
+                            "=== 对准完成! 滤波坐标 (%.2f,%.2f,%.2f) ===",
+                            object_x, object_y, object_z);
+
+                        current_state = STEP_HAND_UP;
+                        StartTimedStep();
+                    }
                 }
 
                 vel_pub->publish(vel_msg);
